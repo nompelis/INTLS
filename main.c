@@ -469,11 +469,11 @@ int dummy( void* ptr )
 #endif
       if( isel < 0 ) {
          fprintf( stdout, " [Error]  Unknown error %d from select()\n", isel );
-         ierr=101;
+         ierr=701;
          break;  // ERROR
       } else if( isel == 0 ) {
          // Timeout reached; this is fatal
-
+         ierr=702;
       }
 
       if( FD_ISSET( ossl->socket, &rfds ) ) {
