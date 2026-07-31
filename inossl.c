@@ -1,9 +1,9 @@
 /******************************************************************************
  Code to do SSL server/client stuff using OpenSSL
 
- Copyright 2018-2025 by Ioannis Nompelis
+ Copyright 2018-2026 by Ioannis Nompelis
 
- Ioannis Nompelis <nompelis@nobelware.com> 2019/03/27 - 2025/07/02
+ Ioannis Nompelis <nompelis@nobelware.com> 2019/03/27 - 2026/07/30
  ******************************************************************************/
 #include <stdio.h>
 #include <stdlib.h>
@@ -157,7 +157,8 @@ int inOSSL_LoadCertificates( SSL_CTX *ctx,
 #ifdef _DEBUG_OSSL_
    fprintf( stdout, " [%s]  Loading certificate: \"%s\" \n", FUNC, keyfile );
 #endif
-   int ierr = SSL_CTX_use_certificate_file( ctx, certfile, SSL_FILETYPE_PEM );
+// int ierr = SSL_CTX_use_certificate_file( ctx, certfile, SSL_FILETYPE_PEM );
+   int ierr = SSL_CTX_use_certificate_chain_file( ctx, certfile );
    if( ierr <= 0 ) {
       fprintf( stdout, " [Error]  Could not load certificate file: \'%s\"\n",
                certfile );

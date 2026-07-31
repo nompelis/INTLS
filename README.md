@@ -35,3 +35,6 @@ if this helped you learn anything.
 
 IN 2025/08/01
 
+Update: using full chain instead of the leaf certificate for producting.
+
+IN 2026/07/30
