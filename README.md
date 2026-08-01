@@ -38,3 +38,8 @@ IN 2025/08/01
 Update: using full chain instead of the leaf certificate for producting.
 
 IN 2026/07/30
+
+Update: hardened the traffic mediation, tightened up losse ends and corrected
+behavior and termination errors.
+
+IN 2026/08/01

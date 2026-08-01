@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <signal.h>
 
 #include <math.h>
 #include <sys/time.h>
@@ -10,9 +11,14 @@
 #include "tcpip.h"
 #include "inossl.h"
 
+#include <errno.h>
 #include <fcntl.h>
 
 #include <pthread.h>
+
+#ifndef MSG_NOSIGNAL
+#define MSG_NOSIGNAL 0
+#endif
 
 
 #define MAX_HEADER_SIZE (8192)
@@ -26,6 +32,33 @@ struct inPthread_s {
    // per-case payload
    struct inOSSL_data_s ossl_data;
    unsigned char buffer[MAX_HEADER_SIZE];
+};
+
+static int retryable_socket_error( int err )
+{
+   return err == EAGAIN || err == EWOULDBLOCK || err == EINTR;
+}
+
+static int find_header_terminator( const unsigned char *buffer, int len )
+{
+   int i;
+
+   if( buffer == NULL || len < 4 ) return -1;
+
+   for( i=0; i <= len - 4; ++i ) {
+      if( buffer[i]   == '\r' && buffer[i+1] == '\n' &&
+          buffer[i+2] == '\r' && buffer[i+3] == '\n' ) {
+         return i + 4;
+      }
+   }
+
+   return -1;
+}
+
+enum ssl_wait_e {
+   SSL_WAIT_NONE = 0,
+   SSL_WAIT_READ,
+   SSL_WAIT_WRITE
 };
 
 
@@ -142,12 +175,7 @@ int dummy_demo( void* ptr )
          fprintf( stdout, "-->%s<--\n", (char*) p->buffer + bytes_tot );
 #endif
          bytes_tot += bytes;
-         char* cptr = (char*) (p->buffer + bytes_tot - 4);
-         if( bytes_tot >= 4 ) 
-         if( cptr[0] == '\r' )
-         if( cptr[1] == '\n' )
-         if( cptr[2] == '\r' )
-         if( cptr[3] == '\n' ) {
+         if( find_header_terminator( p->buffer, bytes_tot ) >= 0 ) {
 #ifdef _DEBUG_
             fprintf( stdout, " [THREAD]  Reached end of request \n" );
 #endif
@@ -366,6 +394,13 @@ int dummy( void* ptr )
          fprintf( stdout, " [Error]  Could not connect to backend \"%s\"\n",
                   servername );
          ierr=500;
+      } else {
+         int bflags = fcntl( backsock, F_GETFL, 0 );
+         if( bflags < 0 || fcntl( backsock, F_SETFL,
+                                  bflags | O_NONBLOCK ) < 0 ) {
+            fprintf( stdout, " [Error]  Could not make backend non-blocking\n" );
+            ierr=501;
+         }
       }
    }
 #ifdef _DEBUG_
@@ -390,6 +425,7 @@ int dummy( void* ptr )
 
       int isel = select( backsock + 1, NULL, &wfds, NULL, &tv );
       if( isel < 0 ) {
+         if( errno == EINTR ) continue;   // immediately retryable
          ierr=601;    // problem with select()
          break;
       } else if( isel == 0 ) {
@@ -398,8 +434,15 @@ int dummy( void* ptr )
       } else {
 
          int req_bytes = num_head - bytes_tot;
-         int bytes = send( backsock, p->buffer + bytes_tot, req_bytes, 0 );
-         if( bytes <= 0 ) {
+         int bytes = send( backsock, p->buffer + bytes_tot, req_bytes,
+                           MSG_NOSIGNAL );
+         if( bytes < 0 ) {
+            if( retryable_socket_error( errno ) ) continue;
+#ifdef _DEBUG_
+            fprintf( stdout, " [THREAD]  send() erroring: %d\n", bytes );
+#endif
+            ierr=603;    // error with send() while sending header
+         } else if( bytes == 0 ) {
 #ifdef _DEBUG_
             fprintf( stdout, " [THREAD]  send() erroring: %d\n", bytes );
 #endif
@@ -427,6 +470,26 @@ int dummy( void* ptr )
    char *b2c_buf = c2b_buf + buf_size;
    int c2b_len=0, c2b_sent=0;
    int b2c_len=0, b2c_sent=0;
+   enum ssl_wait_e ssl_read_wait = SSL_WAIT_NONE;
+   enum ssl_wait_e ssl_write_wait = SSL_WAIT_NONE;
+//
+// ssl_read_wait means: the last attempted SSL_read() did not complete, and
+// OpenSSL told us which socket readiness condition must happen before retrying
+// that same SSL_read().
+// ssl_write_wait means: the last attempted SSL_write() did not complete, and
+// OpenSSL told us which socket readiness condition must happen before retrying
+// that same SSL_write().
+//
+// The variable name is operation-oriented:
+// - ssl_read_wait == SSL_WAIT_READ: retry SSL_read() after the SSL fd is
+//   readable.
+// - ssl_read_wait == SSL_WAIT_WRITE: retry SSL_read() after the SSL fd is
+//   writable.
+// - ssl_write_wait == SSL_WAIT_READ: retry SSL_write() after the SSL fd is
+//   readable.
+// - ssl_write_wait == SSL_WAIT_WRITE: retry SSL_write() after the SSL fd is
+//   writable.
+
 
    int nfds = ossl->socket;
    if( backsock > nfds ) nfds = backsock;
@@ -447,7 +510,10 @@ int dummy( void* ptr )
       FD_ZERO( &rfds ); FD_ZERO( &wfds );
 
       // Want to read from SSL client?
-      if( c2b_len == 0 ) FD_SET( ossl->socket, &rfds );
+      if( ( c2b_len == 0 && ssl_read_wait != SSL_WAIT_WRITE )
+       || ssl_read_wait == SSL_WAIT_READ
+       || ssl_write_wait == SSL_WAIT_READ )
+         FD_SET( ossl->socket, &rfds );
       // Testing only when buffer is empty, for whether client wants to write.
 
       // Want to write to the backend?
@@ -459,7 +525,10 @@ int dummy( void* ptr )
       // Testing only when buffer is empty, for whether backend wants to write.
 
       // Want to write to the SSL client?
-      if( b2c_len > b2c_sent ) FD_SET( ossl->socket, &wfds );
+      if( ( b2c_len > b2c_sent && ssl_write_wait != SSL_WAIT_READ )
+       || ssl_read_wait == SSL_WAIT_WRITE
+       || ssl_write_wait == SSL_WAIT_WRITE )
+         FD_SET( ossl->socket, &wfds );
       // Testing only when buffer has data, for whether client wants to read.
 
       struct timeval tv = {5,0};  // 5 second timeout
@@ -468,6 +537,7 @@ int dummy( void* ptr )
       fprintf( stdout, " [THREAD]  Return from select: %d\n", isel );
 #endif
       if( isel < 0 ) {
+         if( errno == EINTR ) continue;   // immediately retryable
          fprintf( stdout, " [Error]  Unknown error %d from select()\n", isel );
          ierr=701;
          break;  // ERROR
@@ -476,12 +546,33 @@ int dummy( void* ptr )
          ierr=702;
       }
 
-      if( FD_ISSET( ossl->socket, &rfds ) ) {
-//printf(" Reading from SSL...\n" );
+      int try_ssl_read = 0;
+      if( c2b_len == 0 ) {
+         if( ssl_read_wait == SSL_WAIT_WRITE ) {
+            if( FD_ISSET( ossl->socket, &wfds ) ) try_ssl_read = 1;
+         } else if( ssl_read_wait == SSL_WAIT_READ ) {
+            if( FD_ISSET( ossl->socket, &rfds ) ) try_ssl_read = 1;
+         } else {
+            if( FD_ISSET( ossl->socket, &rfds ) ) try_ssl_read = 1;
+         }
+      }
+      if( try_ssl_read ) {
+  printf(" Reading from SSL...\n" );
          int bytes_req = buf_size - c2b_len;
          int bytes = SSL_read( ossl->ssl, c2b_buf + c2b_len, bytes_req );
-//printf(" ...bytes: %d \n", bytes );//HACK
-         if( bytes <= 0 ) break;  // ERROR
+  printf(" ...bytes: %d \n", bytes );//HACK
+         if( bytes <= 0 ) {
+            int serr = SSL_get_error( ossl->ssl, bytes );
+            if( serr == SSL_ERROR_WANT_READ ) {
+               ssl_read_wait = SSL_WAIT_READ;
+               continue;
+            } else if( serr == SSL_ERROR_WANT_WRITE ) {
+               ssl_read_wait = SSL_WAIT_WRITE;
+               continue;
+            }
+            break;  // ERROR
+         }
+         ssl_read_wait = SSL_WAIT_NONE;
          c2b_len = bytes;    // sending will work only with what we got here...
          c2b_sent = 0;       // ...because this is a new payload
       }
@@ -489,31 +580,59 @@ int dummy( void* ptr )
       if( c2b_len > c2b_sent )  // backend may want to read at all times...
                                 // ...but we do not always have stuff to send
       if( FD_ISSET( backsock, &wfds ) ) {
-//printf(" Sending to backend...\n" );
-         int bytes = send( backsock, c2b_buf + c2b_sent, c2b_len - c2b_sent, 0);
-//printf(" ...bytes: %d \n", bytes );//HACK
-         if( bytes <= 0 ) break;  // ERROR
+  printf(" Sending to backend...\n" );
+         int bytes = send( backsock, c2b_buf + c2b_sent, c2b_len - c2b_sent,
+                           MSG_NOSIGNAL );
+  printf(" ...bytes: %d \n", bytes );//HACK
+         if( bytes < 0 ) {
+            if( retryable_socket_error( errno ) ) continue;
+            break;  // ERROR
+         }
+         if( bytes == 0 ) break;  // ERROR
          c2b_sent += bytes;
          if( c2b_sent == c2b_len ) c2b_len = c2b_sent = 0;
       }
 
       if( FD_ISSET( backsock, &rfds ) ) {
-//printf(" Receiving from backend...\n" );
+  printf(" Receiving from backend...\n" );
          int bytes = recv( backsock, b2c_buf, buf_size, 0);
-//printf(" ...bytes: %d \n", bytes );//HACK
-         if( bytes <= 0 ) break;  // ERROR
+  printf(" ...bytes: %d \n", bytes );//HACK
+         if( bytes < 0 ) {
+            if( retryable_socket_error( errno ) ) continue;
+            break;  // ERROR
+         }
+         if( bytes == 0 ) break;  // backend closed cleanly
          b2c_len = bytes;    // sending will work only with what we got here...
          b2c_sent = 0;       // ...because this is a new payload
       }
 
-      if( b2c_len > b2c_sent )  // client may want to read at all times...
-                                // ...but we do not always have stuff to send
-      if( FD_ISSET( ossl->socket, &wfds ) ) {
-//printf(" Writing to SSL...\n" );
+      int try_ssl_write = 0;
+      if( b2c_len > b2c_sent ) {
+         if( ssl_write_wait == SSL_WAIT_READ ) {
+            if( FD_ISSET( ossl->socket, &rfds ) ) try_ssl_write = 1;
+         } else if( ssl_write_wait == SSL_WAIT_WRITE ) {
+            if( FD_ISSET( ossl->socket, &wfds ) ) try_ssl_write = 1;
+         } else {
+            if( FD_ISSET( ossl->socket, &wfds ) ) try_ssl_write = 1;
+         }
+      }
+      if( try_ssl_write ) {
+  printf(" Writing to SSL...\n" );
          int bytes_sen = b2c_len - b2c_sent;
          int bytes = SSL_write( ossl->ssl, b2c_buf + b2c_sent, bytes_sen );
-//printf(" ...bytes: %d \n", bytes );//HACK
-         if( bytes <= 0 ) break;  // ERROR
+  printf(" ...bytes: %d \n", bytes );//HACK
+         if( bytes <= 0 ) {
+            int serr = SSL_get_error( ossl->ssl, bytes );
+            if( serr == SSL_ERROR_WANT_READ ) {
+               ssl_write_wait = SSL_WAIT_READ;
+               continue;
+            } else if( serr == SSL_ERROR_WANT_WRITE ) {
+               ssl_write_wait = SSL_WAIT_WRITE;
+               continue;
+            }
+            break;  // ERROR
+         }
+         ssl_write_wait = SSL_WAIT_NONE;
          b2c_sent += bytes;
          if( b2c_sent == b2c_len ) b2c_len = b2c_sent = 0;
       }
@@ -772,10 +891,13 @@ int main( int argc, char *argv[] )
       return 1;
    }
 
-   start_server( 443 );
+#ifdef _SIGPIPE_BIGHAMMER_
+   signal( SIGPIPE, SIG_IGN );
+#endif
+
+   start_server( 4443 );
 
    inOSSL_DestroySSL();
 
    return EXIT_SUCCESS;
 }
-
