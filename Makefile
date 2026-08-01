@@ -9,8 +9,8 @@
 all:
 	$(CC) -c $(COPTS) $(DEBUG_VAR) tcpip.c
 	$(CC) -c $(COPTS) $(DEBUG_VAR) inossl.c
-	$(CC)    $(COPTS) $(DEBUG_VAR) main.c inossl.c tcpip.o $(LIBS)
+	$(CC) -c $(COPTS) $(DEBUG_VAR) main.c
+	$(CC)    $(COPTS) $(DEBUG_VAR) main.o inossl.o tcpip.o $(LIBS)
 
 clean:
 	rm -f *.o a.out
-

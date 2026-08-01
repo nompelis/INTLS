@@ -3,13 +3,14 @@
 
  Copyright 2018-2026 by Ioannis Nompelis
 
- Ioannis Nompelis <nompelis@nobelware.com> 2019/03/27 - 2026/07/30
+ Ioannis Nompelis <nompelis@nobelware.com> 2019/03/27 - 2026/08/01
  ******************************************************************************/
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
+#include <errno.h>
 #include <math.h>
 #include <sys/time.h>
 #include <time.h>
@@ -98,32 +99,69 @@ int inOSSL_ShutdownSSLSession( SSL *p )
    }
 
    int ierr=0;
+   int ssl_fd = SSL_get_fd( p );
    struct timespec start, now;
    clock_gettime( CLOCK_MONOTONIC, &start );
 
    while(1) {
-      int shutdown_state = SSL_get_shutdown( p );
-      if( shutdown_state & SSL_RECEIVED_SHUTDOWN ) {
-         ierr = SSL_shutdown( p );
-         if( ierr == 1 ) {
-            ierr=0;
-            break;  // clean shutdown
-         } else if( ierr < 0 ) {
-            int serr = SSL_get_error( p, ierr );
-            if( serr != SSL_ERROR_WANT_READ && serr != SSL_ERROR_WANT_WRITE )
-               ierr=3; // fatal error
-            break;  // something went to hell
-         }
+      int wait_read=0, wait_write=0;
+
+      ierr = SSL_shutdown( p );
+      if( ierr == 1 ) {
+         ierr=0;
+         break;  // clean bidirectional shutdown
+      } else if( ierr == 0 ) {
+         ierr=2; // close_notify sent; peer close_notify not received yet
+         wait_read=1;
       } else {
-         ierr=2;
-         break;   // peer has already dropped out
+         int serr = SSL_get_error( p, ierr );
+         if( serr == SSL_ERROR_WANT_READ ) {
+            ierr=4; // nonblocking shutdown still pending
+            wait_read=1;
+         } else if( serr == SSL_ERROR_WANT_WRITE ) {
+            ierr=4; // nonblocking shutdown still pending
+            wait_write=1;
+         } else {
+            ierr=3; // fatal error
+            break;
+         }
       }
 
       // Check hardwired timeout
       clock_gettime( CLOCK_MONOTONIC, &now );
       double elapsed = (now.tv_sec - start.tv_sec)
                      + (now.tv_nsec - start.tv_nsec) / 1e9;
-      if( elapsed > 2000.0 / 1000.0) break;
+      double remaining = 2000.0 / 1000.0 - elapsed;
+      if( remaining <= 0.0 ) break;
+
+      if( wait_read || wait_write ) {
+         if( ssl_fd < 0 ) {
+            ierr=5; // no socket descriptor available
+            break;
+         }
+
+         fd_set rfds, wfds;
+         FD_ZERO( &rfds );
+         FD_ZERO( &wfds );
+         if( wait_read ) FD_SET( ssl_fd, &rfds );
+         if( wait_write ) FD_SET( ssl_fd, &wfds );
+
+         struct timeval tv;
+         tv.tv_sec = (time_t) remaining;
+         tv.tv_usec = (suseconds_t) ((remaining - tv.tv_sec) * 1000000.0);
+
+         int isel = select( ssl_fd + 1,
+                            wait_read  ? &rfds : NULL,
+                            wait_write ? &wfds : NULL,
+                            NULL, &tv );
+         if( isel < 0 ) {
+            if( errno == EINTR ) continue;   // immediately retryable
+            ierr=6; // select error
+            break;
+         } else if( isel == 0 ) {
+            break;
+         }
+      }
    }
 
 
@@ -246,18 +284,22 @@ int inOSSL_CreateServerFromFiles( struct inOSSL_data_s *p,
    }
 
    // verify locations where CA certificates for verification purposes are found
-   if( SSL_CTX_load_verify_locations( p->sslctx, p->ca_cert, p->ca_path ) ) {
-      fprintf( stdout, " [Error]  Could set CA verification file(s) path\n" );
+   if( p->ca_cert != NULL || p->ca_path != NULL ) {
+      if( SSL_CTX_load_verify_locations( p->sslctx,
+                                         p->ca_cert, p->ca_path ) != 1 ) {
+         fprintf( stdout, " [Error]  Could not set CA verification file(s) path\n" );
+         ERR_print_errors_fp( stdout );
 #ifdef _OUTPUT_OSSL_
-      fprintf( stdout, " [%s]  Could not verify CA file location \n", FUNC );
+         fprintf( stdout, " [%s]  Could not verify CA file location \n", FUNC );
 #endif
-      SSL_CTX_free( p->sslctx );
-      p->sslctx = NULL;
-      return 2;
+         SSL_CTX_free( p->sslctx );
+         p->sslctx = NULL;
+         return 2;
 #ifdef _DEBUG_OSSL_
-   } else {
-      fprintf( stdout, " [%s]  Loaded trusted CA certificates \n", FUNC );
+      } else {
+         fprintf( stdout, " [%s]  Loaded trusted CA certificates \n", FUNC );
 #endif
+      }
    }
 
    // prevent this version from being used (apparently due to security issues)
@@ -422,4 +464,3 @@ void inOSSL_QueryVerifyResult( long result )
 
    fprintf( stdout, "\n" );
 }
-

@@ -184,7 +184,7 @@ int tcpip_socket_connect( int port, const char hostname[] )
    hints.ai_family = AF_UNSPEC;
    hints.ai_socktype = SOCK_STREAM;
    hints.ai_protocol = 0;
-   hints.ai_flags = AI_PASSIVE;
+   hints.ai_flags = 0;
    hints.ai_canonname = NULL;
    hints.ai_addr = NULL;
    hints.ai_next = NULL;
@@ -263,4 +263,3 @@ int tcpip_socket_connect( int port, const char hostname[] )
 
    return inet_socket;
 }
-
