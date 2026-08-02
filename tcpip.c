@@ -204,6 +204,7 @@ int tcpip_socket_connect( int port, const char hostname[] )
    char ipstr[INET6_ADDRSTRLEN]; 
    struct sockaddr_in addr;
    uint32_t s_addr;
+   int found=0;
 
    // sweep through results and connect to the first possible address
    for( p=results; p != NULL; p=p->ai_next ) {
@@ -227,7 +228,8 @@ int tcpip_socket_connect( int port, const char hostname[] )
                   ( s_addr & 0xFF000000) >> 24, ipstr );
 #endif
 
-         break; // If we get here, we located a suitable connection address
+         found=1; // If we get here, we located a suitable connection address
+         break;
       } else {
 #ifdef _DEBUG_TCPIP_
          fprintf( stdout, "  - Not a candidate\n" );
@@ -237,7 +239,7 @@ int tcpip_socket_connect( int port, const char hostname[] )
 
    freeaddrinfo( results );
 
-   if( p == NULL ) {
+   if( !found ) {
       FPRINTF( stdout, " [Error]  Could not find a suitable IPv4 address \n" );
       return -2;
    }
