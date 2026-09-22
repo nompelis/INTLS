@@ -354,12 +354,7 @@ int dummy( void* ptr )
          fprintf( stdout, "-->%s<--\n", (char*) p->buffer + bytes_tot );
 #endif
          bytes_tot += bytes;
-         char* cptr = (char*) (p->buffer + bytes_tot - 4);
-         if( bytes_tot >= 4 ) 
-         if( cptr[0] == '\r' )
-         if( cptr[1] == '\n' )
-         if( cptr[2] == '\r' )
-         if( cptr[3] == '\n' ) {
+         if( find_header_terminator( p->buffer, bytes_tot ) >= 0 ) {
 #ifdef _DEBUG_
             fprintf( stdout, " [THREAD]  Reached end of request \n" );
 #endif
@@ -502,7 +497,7 @@ int dummy( void* ptr )
 
 #ifdef _DEBUG_
    if( ierr==0 )
-      fprintf( stdout, " [THREAD]  (Step 5) Meadiating traffic \n" );
+      fprintf( stdout, " [THREAD]  (Step 5) Mediating traffic \n" );
 #endif
    // keep mediating traffic
    while( ierr==0 ) {
