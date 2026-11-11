@@ -43,12 +43,22 @@ int tcpip_socket_listen( int* inet_socket_,
 #endif
 
    int optval=1;
-#ifndef _OLDER_LINUX_
-   setsockopt( inet_socket, SOL_SOCKET, SO_REUSEADDR | SO_REUSEPORT,
-#else
-   setsockopt( inet_socket, SOL_SOCKET, SO_REUSEADDR               ,
+   if( setsockopt( inet_socket, SOL_SOCKET, SO_REUSEADDR,
+                   &optval, sizeof(optval) ) != 0 ) {
+      FPRINTF( stdout, " [Error]  Could not enable SO_REUSEADDR\n" );
+      perror( "setsockopt(SO_REUSEADDR)" );
+      close( inet_socket );
+      return 1;
+   }
+#ifdef SO_REUSEPORT
+   if( setsockopt( inet_socket, SOL_SOCKET, SO_REUSEPORT,
+                   &optval, sizeof(optval) ) != 0 ) {
+      FPRINTF( stdout, " [Error]  Could not enable SO_REUSEPORT\n" );
+      perror( "setsockopt(SO_REUSEPORT)" );
+      close( inet_socket );
+      return 1;
+   }
 #endif
-               &optval, sizeof(optval) );
 
    in_port_t inet_port = htons( port );
 #ifdef _DEBUG_TCPIP_
@@ -97,18 +107,25 @@ int tcpip_socket_listen( int* inet_socket_,
 // 2 -> timeout reached, but some reading may have happened
 //
 
-int tcpip_socket_read( int socket, long int nusec_timeout,
+int tcpip_socket_read( int socket, int64_t nusec_timeout,
                        size_t num, size_t* num_bytes, void* buffer )
 {
-   if( nusec_timeout <= 0 ) nusec_timeout = 5000000000;
+   if( socket < 0 || socket >= FD_SETSIZE || num_bytes == NULL ||
+       (num != 0 && buffer == NULL) ) {
+      FPRINTF( stdout, " [Error]  Invalid input to tcpip_socket_read\n" );
+      return -1;
+   }
+
+   if( nusec_timeout <= 0 ) nusec_timeout = INT64_C( 5000000000 );
 
    // record the start time
    struct timespec ts;
    clock_gettime( CLOCK_MONOTONIC, &ts );
 
    // polling timeout
-   long int msec = nusec_timeout / 1000000000;
-   long int musec = nusec_timeout - msec*1000000000;
+   int64_t timeout_sec = nusec_timeout / INT64_C( 1000000000 );
+   int64_t timeout_nsec = nusec_timeout
+                        - timeout_sec * INT64_C( 1000000000 );
 
    fd_set rfds;
    struct timeval tv;
@@ -117,6 +134,7 @@ int tcpip_socket_read( int socket, long int nusec_timeout,
    FD_ZERO( &rfds );
    nfds = socket + 1;
 
+   const size_t requested_bytes = num;
    int ierr=0;
    *num_bytes=0;
    while( num && ierr == 0 ) {
@@ -125,8 +143,8 @@ int tcpip_socket_read( int socket, long int nusec_timeout,
       FD_SET( socket, &rfds );
 
       // setting timeout values for select
-      tv.tv_sec = (time_t) msec;
-      tv.tv_usec = (suseconds_t) musec;
+      tv.tv_sec = (time_t) timeout_sec;
+      tv.tv_usec = (suseconds_t) (timeout_nsec / INT64_C( 1000 ));
 
       int isel = select( nfds, &rfds, NULL, NULL, &tv );
 #ifdef _DEBUG2_NETWORK_IO_
@@ -145,25 +163,43 @@ int tcpip_socket_read( int socket, long int nusec_timeout,
             FPRINTF( stdout, " [NETIODEBUG]  Connection was dropped\n" );
 #endif
             ierr=1;
-         } else {   // returns on error
+         } else if( errno != EINTR &&
+                    errno != EAGAIN &&
+                    errno != EWOULDBLOCK ) {
 #ifdef _DEBUG2_NETWORK_IO_
             FPRINTF( stdout, " [NETIODEBUG]  Unknown connection error!\n" );
 #endif
             ierr=-1;
          }
+      } else if( isel < 0 &&
+                 errno != EINTR &&
+                 errno != EAGAIN &&
+                 errno != EWOULDBLOCK ) {
+#ifdef _DEBUG2_NETWORK_IO_
+         FPRINTF( stdout, " [NETIODEBUG]  select() failed!\n" );
+#endif
+         ierr=-1;
+      } else if( isel == 0 ) {
+         ierr=2;
       }
 
       struct timespec ts2;
       clock_gettime( CLOCK_MONOTONIC, &ts2 );
-      long int nusec = (ts2.tv_sec - ts.tv_sec) * 1000000000 +
-                       (ts2.tv_nsec - ts.tv_nsec);
+      int64_t elapsed_sec = (int64_t) (ts2.tv_sec - ts.tv_sec);
+      int64_t elapsed_nsec = ts2.tv_nsec - ts.tv_nsec;
+      if( elapsed_nsec < 0 ) {
+         --elapsed_sec;
+         elapsed_nsec += INT64_C( 1000000000 );
+      }
+      int64_t nusec = elapsed_sec * INT64_C( 1000000000 ) + elapsed_nsec;
 #ifdef _DEBUG2_NETWORK_IO_
-      FPRINTF( stdout, " [NETIODEBUG]  Time elapsed: %ld ns\n", nusec );
+      FPRINTF( stdout, " [NETIODEBUG]  Time elapsed: %lld ns\n",
+               (long long) nusec );
 #endif
-      if( nusec > nusec_timeout ) ierr=2;
+      if( ierr == 0 && num != 0 && nusec >= nusec_timeout ) ierr=2;
    }
 
-   if( *num_bytes < num ) {
+   if( *num_bytes < requested_bytes ) {
 #ifdef _DEBUG2_NETWORK_IO_
       FPRINTF( stdout, " [NETIODEBUG]  Received fewer bytes!\n" );
 #endif
@@ -265,3 +301,4 @@ int tcpip_socket_connect( int port, const char hostname[] )
 
    return inet_socket;
 }
+

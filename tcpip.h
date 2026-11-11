@@ -16,6 +16,7 @@
 #include <sys/un.h>
 #include <dlfcn.h>
 #include <errno.h>
+#include <stdint.h>
 
 
 //
@@ -26,7 +27,7 @@ int tcpip_socket_listen( int* inet_socket_,
                          struct sockaddr_in* socket_name,
                          int port, int backlog );
 
-int tcpiip_socket_read( int socket, long int nusec_timeout,
+int tcpip_socket_read( int socket, int64_t nusec_timeout,
                         size_t num, size_t* num_bytes, void* buffer );
 
 int tcpip_socket_connect( int port, const char hostname[] );
